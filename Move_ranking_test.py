@@ -1,8 +1,15 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Apr 23 23:46:21 2025
+
+@author: User
+"""
+
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
-import torch.optim as optim
+import torch.nn.functional as F
 import chess
+import pandas as pd
 from math import sqrt
 
 # Model definition
@@ -54,55 +61,8 @@ class MoveRankingModel(nn.Module):
             move_scores.append(score)
         return torch.stack(move_scores)
 
-# Dataset preparation
-def prepare_dataset(file_path):
-    boards = []
-    legal_moves_list = []
-    best_move_indices = []
-    with open(file_path, "r") as f:
-        for i, line in enumerate(f):
-            
-            info = line.strip().split()
-            fen, uci_move = " ".join(info[:-1]), info[-1]
-            board = chess.Board(fen)
-            best_move = chess.Move.from_uci(uci_move)
-            if (board.turn == chess.BLACK):
-                board = board.mirror()
-                flip_move(best_move)
-            legal_moves = list(board.legal_moves)
-            if best_move not in legal_moves:
-                continue  # Skip invalid moves
-            boards.append(board)
-            legal_moves_list.append(legal_moves)
-            best_move_indices.append(legal_moves.index(best_move))
-    return boards, legal_moves_list, best_move_indices
 
-# Training loop
-def train_model(data_file, epochs=2):
-    model = MoveRankingModel()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    criterion = nn.CrossEntropyLoss(reduction="sum")
-
-    boards, legal_moves_list, best_move_indices = prepare_dataset(data_file)
-
-    for epoch in range(epochs):
-        total_loss = 0
-        for i in range(len(boards)):
-            if (i%1000 == 0):
-                print(i)
-            
-            optimizer.zero_grad()
-            scores = model(boards[i], legal_moves_list[i])
-            target = torch.tensor([best_move_indices[i]], dtype=torch.long)
-            loss = criterion(scores.unsqueeze(0), target)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        
-        print(f"Epoch {epoch}, Average Loss: {total_loss / len(boards):.4f}")
-        torch.save(model,f"moveranking_model_6_epoch{epoch}.pt")
-    return model
-
+# Main execution
 # Inference example
 def rank_moves(board, legal_moves, model):
     
@@ -113,7 +73,50 @@ def rank_moves(board, legal_moves, model):
         move_scores.sort(key=lambda x: x[1], reverse=True)
         return move_scores
 
-# Main execution
-if __name__ == "__main__":
-    data_file = "training_data.txt"
-    model = train_model(data_file)
+model = torch.load("my_best_network.pt", weights_only=False)
+    
+    
+puzzles = pd.read_csv("lichess_puzzle.csv")
+answer_correct = 0
+min_max_differences = []
+chosen_max_differences = []
+too_tight = 0
+top_3 = 0
+
+puzzles = puzzles[puzzles["Rating"]<=1200]
+for i,j in puzzles[["FEN","Moves"]][:10000].iterrows():
+    board = chess.Board(j.FEN)
+    flip_moves = False
+    if board.turn == chess.BLACK:
+        board = board.mirror()
+        flip_moves = True
+    legal_moves = list(board.legal_moves)
+    ranked_moves = rank_moves(board, legal_moves, model)
+    if flip_moves:
+        for x,y in ranked_moves:
+            flip_move(x)
+        board = board.mirror()
+    
+    move_rankings = {m.uci(): s for m, s in ranked_moves}
+    max_moves = ranked_moves[0][1]
+    min_moves = ranked_moves[-1][1]
+    
+    chosen_move = ranked_moves[0][0]
+    value = move_rankings[j.Moves.split()[0]]
+    #print(board)
+    #print(value)
+    #print([(i.uci(), j) for i,j in ranked_moves[:3]])
+    #print("correct move:",j.Moves.split()[0])
+    top_3_current = [i.uci() for i,j in ranked_moves[:3]]
+    top_3 += (j.Moves.split()[0] in top_3_current)
+    min_max_differences.append(max_moves-min_moves)
+    chosen_max_differences.append(max_moves-value)
+    
+import numpy as np
+min_max_differences = np.array(min_max_differences)
+chosen_max_differences = np.array(chosen_max_differences)
+answer_correct = (chosen_max_differences == 0.0).sum()
+print(answer_correct)
+print(top_3)
+print(min_max_differences.mean())
+print(chosen_max_differences.mean())
