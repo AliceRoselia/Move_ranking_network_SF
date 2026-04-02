@@ -15,35 +15,48 @@ def flip_move(move):
     return chess.Move(from_square, to_square, promotion=move.promotion)
 
 class MoveRankingModel(nn.Module):
-    def __init__(self, vector_size=16, vector_size_2=8):
-        super().__init__()
-        self.piece_square_vectors = nn.Parameter(torch.randn(12, 64, vector_size) / sqrt(vector_size))
-        self.move_vectors = nn.Parameter(torch.randn(6, 64, vector_size, vector_size_2) / sqrt(vector_size))
-        self.piece_square_bias = nn.Parameter(torch.randn(vector_size) / sqrt(vector_size))
-        self.bias2 = nn.Parameter(torch.randn(6, 64, vector_size_2))
-        self.output_layer = nn.Parameter(torch.randn(6, 64, vector_size_2) / vector_size_2)
-        self.output_bias = nn.Parameter(torch.zeros(6, 64))
+    def __init__(self, vector_size_0 = 256,vector_size=16,vector_size_2 = 16):
+        
+        super(MoveRankingModel, self).__init__()
+        # 12 piece types (6 white, 6 black), 64 squares, vector size 16
+        self.piece_square_vectors = nn.Parameter(torch.randn(12, 64, vector_size_0)/sqrt(16))
+        self.first_linear_layer = nn.Parameter(torch.randn(vector_size_0,vector_size)/sqrt(vector_size_0))
+        self.first_bias_layer = nn.Parameter(torch.randn(vector_size))
+        # 6 piece types, 64 to-squares, vector size 16
+        self.move_vectors = nn.Parameter(torch.randn(6, 64, vector_size, vector_size_2)/sqrt(vector_size))
+        self.piece_square_bias = nn.Parameter(torch.randn(vector_size_0)/sqrt(16))
+        
+        self.bias2 = nn.Parameter(torch.randn(6,64,vector_size_2))
+        self.output_layer = nn.Parameter(torch.randn(6, 64, vector_size_2)/vector_size_2)
+        self.output_bias = nn.Parameter(torch.zeros(6,64))
 
     def compute_board_representation(self, board):
-        b = self.piece_square_bias.clone()
+        # board: chess.Board object
+        b = torch.clone(self.piece_square_bias)
         for square in chess.SQUARES:
             piece = board.piece_at(square)
             if piece:
+                # Map piece to index: 0-5 (white P,N,B,R,Q,K), 6-11 (black P,N,B,R,Q,K)
                 piece_idx = piece.piece_type - 1 + (6 if piece.color == chess.BLACK else 0)
                 b += self.piece_square_vectors[piece_idx, square]
-        return b
+        shared_hidden = torch.matmul(torch.clamp(b,0.0,1.0),self.first_linear_layer)+self.first_bias_layer
+        return shared_hidden
 
     def forward(self, board, legal_moves):
+        # board: chess.Board object
+        # legal_moves: list of chess.Move objects
         b = self.compute_board_representation(board)
         move_scores = []
         for move in legal_moves:
+            # Get piece type and to-square
             piece = board.piece_at(move.from_square)
             piece_idx = piece.piece_type - 1
             to_square = move.to_square
             move_vec = self.move_vectors[piece_idx, to_square]
             hidden = F.relu(self.bias2[piece_idx, to_square] + torch.matmul(b, move_vec))
-            score = (torch.dot(hidden, self.output_layer[piece_idx, to_square]) + 
-                     self.output_bias[piece_idx, to_square])
+            score = (torch.dot(hidden,self.output_layer[piece_idx,to_square]) + 
+            self.output_bias[piece_idx,to_square])
+            
             move_scores.append(score)
         return torch.stack(move_scores)
 
@@ -80,8 +93,8 @@ def export_quantized_weights(model, filename="weights_quantized.h"):
         quantized_piece_square_vector = (32767 * model.piece_square_vectors.detach().numpy()/scale).astype(np.int16)
         quantized_piece_square_bias = (32767 * model.piece_square_bias.detach().numpy()/scale).astype(np.int16)
 
-        to_cpp_array("constexpr int16_t", "piece_square_vectors", quantized_piece_square_vector, f)
-        to_cpp_array("constexpr int16_t", "piece_square_bias", quantized_piece_square_bias, f)
+        to_cpp_array("alignas(64) constexpr int16_t", "piece_square_vectors", quantized_piece_square_vector, f)
+        to_cpp_array("alignas(64) constexpr int16_t", "piece_square_bias", quantized_piece_square_bias, f)
         
         
         # At this point, scale = 13008.456072094963, meaning 13008 means 1.
@@ -90,8 +103,8 @@ def export_quantized_weights(model, filename="weights_quantized.h"):
         
         #At this point, scale = 213130544.28520387
 
-        to_cpp_array("constexpr int32_t","bias2",quantized_bias2,f)
-        to_cpp_array("constexpr int16_t", "move_vectors", quantized_move_vectors, f)
+        to_cpp_array("alignas(64) constexpr int32_t","bias2",quantized_bias2,f)
+        to_cpp_array("alignas(64) constexpr int16_t", "move_vectors", quantized_move_vectors, f)
         
         #1.0380
         scale2 = 0.6366
@@ -100,8 +113,8 @@ def export_quantized_weights(model, filename="weights_quantized.h"):
         #final_scale = 3252.1140180237408
         #Scaled up to 6416306.60095038
         quantized_output_bias = ((32767/scale*512/(2**16)*32767/scale2) * model.output_bias.detach().numpy()).astype(np.int32)
-        to_cpp_array("constexpr int16_t","output_layer",quantized_output_layer,f)
-        to_cpp_array("constexpr int32_t", "output_bias", quantized_output_bias, f)
+        to_cpp_array("alignas(64) constexpr int16_t","output_layer",quantized_output_layer,f)
+        to_cpp_array("alignas(64) constexpr int32_t", "output_bias", quantized_output_bias, f)
         
 
 # Validation
@@ -157,12 +170,12 @@ def rank_moves(board, legal_moves, model):
 
 # Main
 if __name__ == "__main__":
-    model = torch.load("moveranking_model_7_epoch0.pt", weights_only=False)
+    model = torch.load("moveranking_model_8_epoch1.pt", weights_only=False)
     #model.eval()
 
-    #puzzles = pd.read_csv("lichess_puzzle.csv")
-    #print("Evaluating original model...")
-    #top1, top3 = evaluate_model(model, puzzles)
+    puzzles = pd.read_csv("lichess_puzzle.csv")
+    print("Evaluating original model...")
+    top1, top3 = evaluate_model(model, puzzles)
 
     print("Quantizing weights...")
     export_quantized_weights(model, "weights_quantized.h")
